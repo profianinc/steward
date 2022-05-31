@@ -96,13 +96,13 @@ impl<'a> PrivateKeyInfoExt for PrivateKeyInfo<'a> {
         match (self.algorithm.oids()?, algo) {
             ((ECPK, Some(P256)), ES256) => {
                 use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_ASN1_SIGNING as ALG};
-                let kp = EcdsaKeyPair::from_pkcs8(&ALG, &self.to_vec()?)?;
+                let kp = EcdsaKeyPair::from_pkcs8(&ALG, &self.to_vec()? /*, &rng*/)?; // rng needed in ring 0.17
                 Ok(kp.sign(&rng, body)?.as_ref().to_vec())
             }
 
             ((ECPK, Some(P384)), ES384) => {
                 use ring::signature::{EcdsaKeyPair, ECDSA_P384_SHA384_ASN1_SIGNING as ALG};
-                let kp = EcdsaKeyPair::from_pkcs8(&ALG, &self.to_vec()?)?;
+                let kp = EcdsaKeyPair::from_pkcs8(&ALG, &self.to_vec()? /*, &rng*/)?; // rng needed in ring 0.17
                 Ok(kp.sign(&rng, body)?.as_ref().to_vec())
             }
 

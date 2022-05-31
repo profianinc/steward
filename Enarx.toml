@@ -1,0 +1,16 @@
+args = ["steward.wasm", "--crt", "certs/test/crt.der", "--key", "certs/test/key.der"]
+
+[[files]]
+kind = "stdin"
+
+[[files]]
+kind = "stdout"
+
+[[files]]
+kind = "stderr"
+
+[[files]]
+kind = "listen"
+prot = "tcp"
+port = 8443
+name = "TEST_TCP_LISTEN"
