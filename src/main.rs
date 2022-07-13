@@ -431,7 +431,16 @@ mod tests {
 
         fn cr(curve: ObjectIdentifier, exts: Vec<Extension<'_>>) -> Vec<u8> {
             let pki = PrivateKeyInfo::generate(curve).unwrap();
-            let pki = PrivateKeyInfo::from_der(pki.as_ref()).unwrap();
+            let pki = PrivateKeyInfo::from_der(pki.as_ref())
+                .map_err(|e| {
+                    eprintln!(
+                        "{}:{} PrivateKeyInfo::from_der() error: {:?}",
+                        file!(),
+                        line!(),
+                        e
+                    )
+                })
+                .unwrap();
             let spki = pki.public_key().unwrap();
 
             let req = ExtensionReq::from(exts).to_vec().unwrap();

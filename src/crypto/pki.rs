@@ -9,6 +9,9 @@ use der::{Decodable, Encodable};
 use sec1::EcPrivateKey;
 use spki::AlgorithmIdentifier;
 
+#[cfg(target_os = "wasi")]
+use wasi_crypto_guest::signatures::SignatureKeyPair;
+
 use const_oid::db::rfc5912::{
     ECDSA_WITH_SHA_256, ECDSA_WITH_SHA_384, ID_EC_PUBLIC_KEY as ECPK, SECP_256_R_1 as P256,
     SECP_384_R_1 as P384,
@@ -50,23 +53,44 @@ pub trait PrivateKeyInfoExt {
 
 impl<'a> PrivateKeyInfoExt for PrivateKeyInfo<'a> {
     fn generate(oid: ObjectIdentifier) -> Result<Zeroizing<Vec<u8>>> {
-        let rand = ring::rand::SystemRandom::new();
+        #[cfg(not(target_os = "wasi"))]
+        {
+            let rand = ring::rand::SystemRandom::new();
 
-        let doc = match oid {
-            P256 => {
-                use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_ASN1_SIGNING as ALG};
-                EcdsaKeyPair::generate_pkcs8(&ALG, &rand)?
-            }
+            let doc = match oid {
+                P256 => {
+                    use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_ASN1_SIGNING as ALG};
+                    EcdsaKeyPair::generate_pkcs8(&ALG, &rand)?
+                }
 
-            P384 => {
-                use ring::signature::{EcdsaKeyPair, ECDSA_P384_SHA384_ASN1_SIGNING as ALG};
-                EcdsaKeyPair::generate_pkcs8(&ALG, &rand)?
-            }
+                P384 => {
+                    use ring::signature::{EcdsaKeyPair, ECDSA_P384_SHA384_ASN1_SIGNING as ALG};
+                    EcdsaKeyPair::generate_pkcs8(&ALG, &rand)?
+                }
 
-            _ => return Err(anyhow!("unsupported")),
-        };
+                _ => return Err(anyhow!("unsupported")),
+            };
 
-        Ok(doc.as_ref().to_vec().into())
+            Ok(doc.as_ref().to_vec().into())
+        }
+
+        #[cfg(target_os = "wasi")]
+        {
+            let doc = match oid {
+                P256 => SignatureKeyPair::generate("ECDSA_P256_SHA256")
+                    .map_err(|e| eprintln!("Key pair generation error for P256: {:?}", e))
+                    .unwrap(),
+                P384 => SignatureKeyPair::generate("ECDSA_P384_SHA384")
+                    .map_err(|e| eprintln!("Key pair generation error for P384: {:?}", e))
+                    .unwrap(),
+                x => {
+                    eprintln!("Unknown algorithm: {:?}", x);
+                    return Err(anyhow!(format!("unknown algorithm: {:?}", x)));
+                }
+            };
+
+            Ok(doc.raw().unwrap().to_vec().unwrap().into())
+        }
     }
 
     fn public_key(&self) -> Result<SubjectPublicKeyInfo<'_>> {
@@ -92,21 +116,41 @@ impl<'a> PrivateKeyInfoExt for PrivateKeyInfo<'a> {
     }
 
     fn sign(&self, body: &[u8], algo: AlgorithmIdentifier<'_>) -> Result<Vec<u8>> {
-        let rng = ring::rand::SystemRandom::new();
-        match (self.algorithm.oids()?, algo) {
-            ((ECPK, Some(P256)), ES256) => {
-                use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_ASN1_SIGNING as ALG};
-                let kp = EcdsaKeyPair::from_pkcs8(&ALG, &self.to_vec()? /*, &rng*/)?; // rng needed in ring 0.17
-                Ok(kp.sign(&rng, body)?.as_ref().to_vec())
-            }
+        #[cfg(not(target_os = "wasi"))]
+        {
+            let rng = ring::rand::SystemRandom::new();
+            match (self.algorithm.oids()?, algo) {
+                ((ECPK, Some(P256)), ES256) => {
+                    use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_ASN1_SIGNING as ALG};
+                    let kp = EcdsaKeyPair::from_pkcs8(&ALG, &self.to_vec()? /*, &rng*/)?; // rng needed in ring 0.17
+                    Ok(kp.sign(&rng, body)?.as_ref().to_vec())
+                }
 
-            ((ECPK, Some(P384)), ES384) => {
-                use ring::signature::{EcdsaKeyPair, ECDSA_P384_SHA384_ASN1_SIGNING as ALG};
-                let kp = EcdsaKeyPair::from_pkcs8(&ALG, &self.to_vec()? /*, &rng*/)?; // rng needed in ring 0.17
-                Ok(kp.sign(&rng, body)?.as_ref().to_vec())
-            }
+                ((ECPK, Some(P384)), ES384) => {
+                    use ring::signature::{EcdsaKeyPair, ECDSA_P384_SHA384_ASN1_SIGNING as ALG};
+                    let kp = EcdsaKeyPair::from_pkcs8(&ALG, &self.to_vec()? /*, &rng*/)?; // rng needed in ring 0.17
+                    Ok(kp.sign(&rng, body)?.as_ref().to_vec())
+                }
 
-            _ => Err(anyhow!("unsupported")),
+                _ => Err(anyhow!("unsupported")),
+            }
+        }
+
+        #[cfg(target_os = "wasi")]
+        {
+            match (self.algorithm.oids()?, algo) {
+                ((ECPK, Some(P256)), ES256) => {
+                    let kp =
+                        SignatureKeyPair::from_pkcs8("ECDSA_P256_SHA256", &self.to_vec()?).unwrap();
+                    Ok(kp.sign(body).unwrap().raw().unwrap())
+                }
+                ((ECPK, Some(P384)), ES384) => {
+                    let kp =
+                        SignatureKeyPair::from_pkcs8("ECDSA_P384_SHA384", &self.to_vec()?).unwrap();
+                    Ok(kp.sign(body).unwrap().raw().unwrap())
+                }
+                _ => Err(anyhow!("unsupported")),
+            }
         }
     }
 }

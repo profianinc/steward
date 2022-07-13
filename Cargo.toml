@@ -37,8 +37,11 @@ toml = { version = "0.5.9", default-features = false }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 pem = { version = "0.8" }
 tokio = { git = "https://github.com/rjzak/tokio", branch = "wasi_wip", features = ["macros", "rt"] }
+wasi-crypto-guest = { path = "wasi-crypto/implementations/bindings/rust" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# sha2 = "^0.10.2"
+# ring = { version = "0.16.20", features = ["std"] }
 tokio = { git = "https://github.com/rjzak/tokio", branch = "wasi_wip", features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]
