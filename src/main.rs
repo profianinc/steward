@@ -11,16 +11,13 @@ mod ext;
 
 use crypto::*;
 use ext::{kvm::Kvm, sgx::Sgx, snp::Snp, ExtVerifier};
-use rustls_pemfile::Item;
 use x509::ext::pkix::name::GeneralName;
 
-use std::fs::read;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use anyhow::Context;
 use axum::body::Bytes;
 use axum::extract::{Extension, TypedHeader};
 use axum::headers::ContentType;
@@ -37,6 +34,7 @@ use const_oid::db::rfc5912::ID_EXTENSION_REQ;
 use der::asn1::{GeneralizedTime, Ia5String, UIntBytes};
 use der::{Decodable, Encodable};
 use pkcs8::PrivateKeyInfo;
+use rustls_pemfile::Item;
 use x509::ext::pkix::{BasicConstraints, ExtendedKeyUsage, KeyUsage, KeyUsages, SubjectAltName};
 use x509::name::RdnSequence;
 use x509::request::{CertReq, ExtensionReq};
@@ -45,6 +43,16 @@ use x509::{Certificate, PkiPath, TbsCertificate};
 
 use clap::Parser;
 use zeroize::Zeroizing;
+
+#[cfg(not(target_arch = "wasm32"))]
+use anyhow::Context;
+#[cfg(not(target_arch = "wasm32"))]
+use std::fs::read;
+#[cfg(not(target_arch = "wasm32"))]
+use std::net::SocketAddr;
+
+#[cfg(target_arch = "wasm32")]
+use pem;
 
 const PKCS10: &str = "application/pkcs10";
 
@@ -86,6 +94,7 @@ struct State {
 }
 
 impl State {
+    #[allow(unused_variables, dead_code)]
     pub fn load(
         san: Option<String>,
         key: impl AsRef<Path>,
@@ -110,6 +119,21 @@ impl State {
         Certificate::from_der(crt.as_ref())?;
 
         Ok(Self { key, crt, san })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn load_memory() -> anyhow::Result<Self> {
+        const CRT: &str = include_str!("../testdata/ca.crt");
+        const KEY: &str = include_str!("../testdata/ca.key");
+
+        let crt = pem::parse(CRT)?;
+        let key = pem::parse(KEY)?;
+
+        Ok(State {
+            key: Zeroizing::new(key.contents),
+            crt: crt.contents,
+            san: None,
+        })
     }
 
     pub fn generate(san: Option<String>, hostname: &str) -> anyhow::Result<Self> {
@@ -170,6 +194,32 @@ impl State {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> anyhow::Result<()> {
+    use std::os::wasi::io::FromRawFd;
+
+    tracing_subscriber::fmt::init();
+
+    let args = Args::parse();
+    let state = match (args.key, args.crt, args.host) {
+        (None, None, Some(host)) => State::generate(args.san, &host)?,
+        (Some(key), Some(crt), _) => State::load(args.san, key, crt)?,
+        (None, None, None) => State::load_memory()?,
+        _ => panic!("invalid configuration"),
+    };
+
+    let std_listener = unsafe { std::net::TcpListener::from_raw_fd(3) };
+    std_listener.set_nonblocking(true).unwrap();
+    axum::Server::from_tcp(std_listener)
+        .unwrap()
+        .serve(app(state).into_make_service())
+        .await?;
+
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
@@ -206,7 +256,6 @@ async fn main() -> anyhow::Result<()> {
         })
         .map(Args::parse_from)
         .context("Failed to parse arguments")?;
-    let addr = SocketAddr::from((args.addr, args.port));
     let state = match (args.key, args.crt, args.host) {
         (None, None, Some(host)) => State::generate(args.san, &host)?,
         (Some(key), Some(crt), _) => State::load(args.san, key, crt)?,
@@ -216,6 +265,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let addr = SocketAddr::from((args.addr, args.port));
     tracing::debug!("listening on {}", addr);
     axum::Server::bind(&addr)
         .serve(app(state).into_make_service())
@@ -370,6 +420,7 @@ mod tests {
         use hyper::Body;
         use tower::ServiceExt; // for `app.oneshot()`
 
+        #[cfg(not(target_os = "wasi"))]
         fn certificates_state() -> State {
             State::load(None, "testdata/ca.key", "testdata/ca.crt").unwrap()
         }
@@ -380,7 +431,16 @@ mod tests {
 
         fn cr(curve: ObjectIdentifier, exts: Vec<Extension<'_>>) -> Vec<u8> {
             let pki = PrivateKeyInfo::generate(curve).unwrap();
-            let pki = PrivateKeyInfo::from_der(pki.as_ref()).unwrap();
+            let pki = PrivateKeyInfo::from_der(pki.as_ref())
+                .map_err(|e| {
+                    eprintln!(
+                        "{}:{} PrivateKeyInfo::from_der() error: {:?}",
+                        file!(),
+                        line!(),
+                        e
+                    )
+                })
+                .unwrap();
             let spki = pki.public_key().unwrap();
 
             let req = ExtensionReq::from(exts).to_vec().unwrap();
@@ -426,6 +486,7 @@ mod tests {
         }
 
         #[tokio::test]
+        #[cfg(not(target_os = "wasi"))]
         async fn kvm_certs() {
             let ext = Extension {
                 extn_id: Kvm::OID,
@@ -467,6 +528,7 @@ mod tests {
         }
 
         #[tokio::test]
+        #[cfg(not(target_os = "wasi"))]
         async fn sgx_certs() {
             for quote in [
                 include_bytes!("ext/sgx/quote.unknown").as_slice(),
@@ -518,6 +580,7 @@ mod tests {
         }
 
         #[tokio::test]
+        #[cfg(not(target_os = "wasi"))]
         async fn snp_certs() {
             let evidence = ext::snp::Evidence {
                 vcek: Certificate::from_der(include_bytes!("ext/snp/milan.vcek")).unwrap(),
@@ -573,6 +636,7 @@ mod tests {
         }
 
         #[tokio::test]
+        #[cfg(not(target_os = "wasi"))]
         async fn err_no_attestation_certs() {
             let request = Request::builder()
                 .method("POST")
@@ -599,6 +663,7 @@ mod tests {
         }
 
         #[tokio::test]
+        #[cfg(not(target_os = "wasi"))]
         async fn err_no_content_type() {
             let request = Request::builder()
                 .method("POST")
@@ -611,6 +676,7 @@ mod tests {
         }
 
         #[tokio::test]
+        #[cfg(not(target_os = "wasi"))]
         async fn err_bad_content_type() {
             let request = Request::builder()
                 .method("POST")
@@ -624,6 +690,7 @@ mod tests {
         }
 
         #[tokio::test]
+        #[cfg(not(target_os = "wasi"))]
         async fn err_empty_body() {
             let request = Request::builder()
                 .method("POST")
@@ -637,6 +704,7 @@ mod tests {
         }
 
         #[tokio::test]
+        #[cfg(not(target_os = "wasi"))]
         async fn err_bad_body() {
             let request = Request::builder()
                 .method("POST")
@@ -650,6 +718,7 @@ mod tests {
         }
 
         #[tokio::test]
+        #[cfg(not(target_os = "wasi"))]
         async fn err_bad_csr_sig() {
             let mut cr = cr(SECP_256_R_1, vec![]);
             let last = cr.last_mut().unwrap();

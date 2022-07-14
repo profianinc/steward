@@ -1,0 +1,6 @@
+[build]
+target = "wasm32-wasi"
+rustflags = ["--cfg", "tokio_unstable"]
+
+[target.wasm32-wasi]
+runner = ["enarx", "run", "--wasmcfgfile", "Enarx.toml"]

@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2022 Profian Inc. <opensource@profian.com>
 // SPDX-License-Identifier: AGPL-3.0-only
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
 use const_oid::ObjectIdentifier;
 use der::{Any, Decodable, Sequence};
-use ring::signature::VerificationAlgorithm as VerAlg;
-use ring::signature::*;
 use spki::{AlgorithmIdentifier, SubjectPublicKeyInfo};
 
 use const_oid::db::rfc5912::{
@@ -14,6 +14,14 @@ use const_oid::db::rfc5912::{
 };
 
 use anyhow::{anyhow, Result};
+
+#[cfg(not(target_os = "wasi"))]
+use ring::signature::VerificationAlgorithm as VerAlg;
+#[cfg(not(target_os = "wasi"))]
+use ring::signature::*;
+
+#[cfg(target_os = "wasi")]
+use wasi_crypto_guest::signatures::{Signature, SignatureKeyPair};
 
 const ES256: (ObjectIdentifier, Option<Any<'static>>) = (ECDSA_WITH_SHA_256, None);
 const ES384: (ObjectIdentifier, Option<Any<'static>>) = (ECDSA_WITH_SHA_384, None);
@@ -46,44 +54,71 @@ pub trait SubjectPublicKeyInfoExt {
 
 impl<'a> SubjectPublicKeyInfoExt for SubjectPublicKeyInfo<'a> {
     fn verify(&self, body: &[u8], algo: AlgorithmIdentifier<'_>, sign: &[u8]) -> Result<()> {
-        let alg: &'static dyn VerAlg = match (self.algorithm.oids()?, (algo.oid, algo.parameters)) {
-            ((ECPK, Some(P256)), ES256) => &ECDSA_P256_SHA256_ASN1,
-            ((ECPK, Some(P384)), ES384) => &ECDSA_P384_SHA384_ASN1,
-            ((RSA, None), (ID_RSASSA_PSS, Some(p))) => {
-                // Decompose the RSA PSS parameters.
-                let RsaSsaPssParams {
-                    hash_algorithm: hash,
-                    mask_algorithm: mask,
-                    salt_length: salt,
-                    trailer_field: tfld,
-                } = p.decode_into()?;
+        #[cfg(not(target_os = "wasi"))]
+        {
+            let alg: &'static dyn VerAlg =
+                match (self.algorithm.oids()?, (algo.oid, algo.parameters)) {
+                    ((ECPK, Some(P256)), ES256) => &ECDSA_P256_SHA256_ASN1,
+                    ((ECPK, Some(P384)), ES384) => &ECDSA_P384_SHA384_ASN1,
+                    ((RSA, None), (ID_RSASSA_PSS, Some(p))) => {
+                        // Decompose the RSA PSS parameters.
+                        let RsaSsaPssParams {
+                            hash_algorithm: hash,
+                            mask_algorithm: mask,
+                            salt_length: salt,
+                            trailer_field: tfld,
+                        } = p.decode_into()?;
 
-                // Validate the sanity of the mask algorithm.
-                let algo = match (mask.oid, mask.parameters) {
-                    (ID_MGF_1, Some(p)) => {
-                        let p = p.decode_into::<AlgorithmIdentifier<'_>>()?;
-                        match (p.oids()?, salt, tfld) {
-                            ((SHA256, None), 32, 1) => Ok(SHA256),
-                            ((SHA384, None), 48, 1) => Ok(SHA384),
-                            ((SHA512, None), 64, 1) => Ok(SHA512),
+                        // Validate the sanity of the mask algorithm.
+                        let algo = match (mask.oid, mask.parameters) {
+                            (ID_MGF_1, Some(p)) => {
+                                let p = p.decode_into::<AlgorithmIdentifier<'_>>()?;
+                                match (p.oids()?, salt, tfld) {
+                                    ((SHA256, None), 32, 1) => Ok(SHA256),
+                                    ((SHA384, None), 48, 1) => Ok(SHA384),
+                                    ((SHA512, None), 64, 1) => Ok(SHA512),
+                                    _ => Err(anyhow!("unsupported")),
+                                }
+                            }
                             _ => Err(anyhow!("unsupported")),
+                        }?;
+
+                        // Prepare for validation.
+                        match (hash.oids()?, algo) {
+                            ((SHA256, None), SHA256) => &RSA_PSS_2048_8192_SHA256,
+                            ((SHA384, None), SHA384) => &RSA_PSS_2048_8192_SHA384,
+                            ((SHA512, None), SHA512) => &RSA_PSS_2048_8192_SHA512,
+                            _ => return Err(anyhow!("unsupported")),
                         }
                     }
-                    _ => Err(anyhow!("unsupported")),
-                }?;
-
-                // Prepare for validation.
-                match (hash.oids()?, algo) {
-                    ((SHA256, None), SHA256) => &RSA_PSS_2048_8192_SHA256,
-                    ((SHA384, None), SHA384) => &RSA_PSS_2048_8192_SHA384,
-                    ((SHA512, None), SHA512) => &RSA_PSS_2048_8192_SHA512,
                     _ => return Err(anyhow!("unsupported")),
-                }
-            }
-            _ => return Err(anyhow!("unsupported")),
-        };
+                };
 
-        let upk = UnparsedPublicKey::new(alg, self.subject_public_key);
-        Ok(upk.verify(body, sign)?)
+            let upk = UnparsedPublicKey::new(alg, self.subject_public_key);
+            Ok(upk.verify(body, sign)?)
+        }
+
+        #[cfg(target_os = "wasi")]
+        {
+            let (pk, sig) = match self.algorithm.oids()? {
+                (ECPK, Some(P256)) => (
+                    SignatureKeyPair::from_pkcs8("ECDSA_P256_SHA256", &self.subject_public_key)
+                        .unwrap()
+                        .publickey()
+                        .unwrap(),
+                    Signature::from_raw("ECDSA_P256_SHA256", sign).unwrap(),
+                ),
+                (ECPK, Some(P384)) => (
+                    SignatureKeyPair::from_pkcs8("ECDSA_P384_SHA384", &self.subject_public_key)
+                        .unwrap()
+                        .publickey()
+                        .unwrap(),
+                    Signature::from_raw("ECDSA_P384_SHA384", sign).unwrap(),
+                ),
+                _ => return Err(anyhow!("unsupported")),
+            };
+
+            Ok(pk.signature_verify(body, &sig).unwrap())
+        }
     }
 }
